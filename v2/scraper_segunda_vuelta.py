@@ -239,7 +239,7 @@ if api_ok:
     if provincias_pendientes:
         df_distritos_pendientes = df_distritos[df_distritos["ubigeo_prov"].isin(provincias_pendientes)]
     else:
-        df_distritos_pendientes = df_distritos.iloc[:0]  # empty
+        df_distritos_pendientes = df_distritos.iloc[:0]
     n_dist_pendientes = len(df_distritos_pendientes)
     n_dist_completos = n_dist - n_dist_pendientes
     print(f"  {n_dist_pendientes} distritos pendientes, {n_dist_completos} al 100% (usaran cache)")
@@ -422,21 +422,22 @@ else:
     df_ext = cache_ext if cache_ext is not None else pd.DataFrame()
     print(f"  Extranjero: {len(df_ext)} registros (cache)")
 
-# --- MODELO EXTRANJERO: extrapolar con datos reales disponibles ---
+# --- MODELO EXTRANJERO: solo para continentes SIN datos reales ---
 ext_modelo_aplicado = False
 if not df_ext.empty:
     avance_ext = df_ext["avance_pct"].mean()
     continentes_con_datos = df_ext[df_ext["avance_pct"] > 0]
     if len(continentes_con_datos) > 0 and avance_ext < 100:
-        # Extrapolar los continentes con datos al 100%
         ext_validos = continentes_con_datos.copy()
         ext_validos["votos_estimados"] = ext_validos["votos"] / (ext_validos["avance_pct"] / 100)
         ext_validos["candidato"] = ext_validos["candidato"].fillna(ext_validos["partido"])
         total_ext_est = ext_validos["votos_estimados"].sum()
         shares_ext = ext_validos.groupby(["candidato", "partido"])["votos_estimados"].sum()
         shares_ext = shares_ext / shares_ext.sum()
-        
-        # Aplicar shares a TODAS las regiones del extranjero (total 1V como peso)
+
+        continentes_con_datos_ubigeos = set(continentes_con_datos["ubigeo_dist"].unique())
+        totales_por_continente = df_ext.groupby("ubigeo_dist")["votos"].sum()
+
         PATH_1V = "base_intermedia_proyeccion.csv"
         if os.path.exists(PATH_1V):
             df_1v = pd.read_csv(PATH_1V)
@@ -444,6 +445,8 @@ if not df_ext.empty:
             if not ext_1v.empty:
                 modelo_ext = []
                 for ubigeo, nombre in extranjero_regiones:
+                    if ubigeo in continentes_con_datos_ubigeos and totales_por_continente.get(ubigeo, 0) > 0:
+                        continue
                     total_region_1v = ext_1v[ext_1v["departamento"] == f"EXTERIOR_{nombre}"]["votos_estimados"].sum()
                     if total_region_1v == 0:
                         continue
@@ -454,13 +457,15 @@ if not df_ext.empty:
                             "ubigeo_dist": ubigeo,
                             "candidato": candidato, "partido": partido,
                             "votos": total_region_1v * share,
-                            "avance_pct": 100.0,
+                            "avance_pct": avance_ext,
                         })
-                df_modelo = pd.DataFrame(modelo_ext)
-                n_regiones_con_datos = continentes_con_datos["ubigeo_dist"].nunique()
-                print(f"  Extranjero: {n_regiones_con_datos}/5 regiones con datos reales")
-                print(f"  Total extranjero estimado: {df_modelo['votos'].sum():,.0f} votos")
-                ext_modelo_aplicado = True
+                if modelo_ext:
+                    df_modelo = pd.DataFrame(modelo_ext)
+                    print(f"  Extranjero: modelo para {len(df_modelo)//len(shares_ext)} continentes sin datos")
+                    print(f"  Total extranjero estimado: {(df_modelo['votos'].sum() + df_ext['votos'].sum()):,.0f} votos")
+                    ext_modelo_aplicado = True
+                else:
+                    print(f"  Extranjero: todos los continentes tienen datos reales (sin modelo)")
 else:
     print("  Extranjero: sin datos aun")
 
@@ -552,10 +557,11 @@ if sin_actas > 0:
     df_final = df_final.drop(columns=["avance_prov_media"])
     print(f"  {sin_actas} registros sin actas prorrateados con media provincial")
 
-# --- 7c. Extranjero: API si tiene datos completos, sino modelo extrapolado ---
+# --- 7c. Extranjero: datos reales + modelo solo para continentes sin datos ---
 if ext_modelo_aplicado:
-    print(f"  Extranjero: usando modelo extrapolado desde datos reales parciales")
-    df_total = pd.concat([df_final, df_modelo], ignore_index=True)
+    df_ext["avance_pct"] = df_ext["avance_pct"].replace(0, np.nan)
+    df_total = pd.concat([df_final, df_ext, df_modelo], ignore_index=True)
+    print(f"  Extranjero: {len(df_ext)} filas reales + {len(df_modelo)} filas modelo")
 elif not df_ext.empty:
     df_ext["avance_pct"] = df_ext["avance_pct"].replace(0, np.nan)
     df_total = pd.concat([df_final, df_ext], ignore_index=True)
